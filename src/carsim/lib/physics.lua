@@ -57,6 +57,8 @@ function physics.setGeometry(mesh)
   K2 = A * B
 end
 
+-- The body axes in the world (h.r11 .. h.r33), for the renderer only: run
+-- once a frame, not every step.
 local function updateMatrix(h)
   local cy, sy = cos(h.yaw), sin(h.yaw)
   local cp, sp = cos(h.pitch), sin(h.pitch)
@@ -180,8 +182,9 @@ function physics.step(h, inp, dt)
   -- (roll > 0 lifts the left side: a left turn, ay > 0, leans it right)
   h.roll = h.roll + (ay * ROLL_K - h.roll) * kl
   h.pitch = h.pitch + (ax * PITCH_K - h.pitch) * kl
-  updateMatrix(h)
 end
+
+physics.updateMatrix = updateMatrix
 
 -- Stop dead (hitting the wall at the edge of the world).
 function physics.stop(h)

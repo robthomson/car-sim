@@ -326,6 +326,7 @@ local function closeSettings(state)
   state.settingsOpen = false
   pcall(form.clear)
   state.lastTime = nil
+  state.framePending = false
   render.dirty()
   lcd.invalidate()
 end
@@ -393,6 +394,10 @@ function sim.create()
     wrongTime = 0,
     flashTime = 0,
     nextAwake = 0,
+    frameDt = 0,            -- time since the camera last moved
+    framePending = false,   -- a frame is built and waits for its paint
+    pendingAt = 0,
+    wakes = 0, paints = 0, rateAt = 0, rate = 0, fps = 0,
     hudSpeed = "0", hudSpeedUnit = "", hudLap = "", hudTime = "", hudBest = "", hudLast = "",
     wheelRadio = isWheelRadio(),
     srcWheel = analogSource(WHEEL),
@@ -477,19 +482,39 @@ function sim.wakeup(state)
   end
   if state.phase == "race" then state.lapTime = state.lapTime + dt end
 
-  car.animate(h.steer)
-  local w, hgt = lcd.getWindowSize()
-  render.track(h, state.cfg.camera / 100, dt)
-  local drew = render.frame(h, w, hgt, h.steer)
-  local hudChanged = updateHud(state)
-
-  if state.cfg.stats then
-    state.wakes = (state.wakes or 0) + 1
-    if t >= (state.rateAt or 0) then
-      state.rate, state.wakes, state.rateAt = state.wakes, 0, t + 1
+  local stats = state.cfg.stats
+  if stats then
+    state.wakes = state.wakes + 1
+    if t >= state.rateAt then
+      -- Once a second: wakeups and paints (frames) per second.
+      state.rate, state.fps = state.wakes, state.paints
+      state.wakes, state.paints, state.rateAt = 0, 0, t + 1
     end
   end
-  if drew or hudChanged or state.cfg.stats then lcd.invalidate() end
+
+  -- Build the next frame only once the last one is on screen. On a radio a
+  -- paint can outlast the wakeup interval, and a frame built in between
+  -- would never be seen. (Should a paint never come, rebuild after a while.)
+  state.frameDt = state.frameDt + dt
+  if state.framePending and t - state.pendingAt < 0.5 then return end
+
+  -- The wheels turn in 1.4 degree steps (under a pixel at the tyre's edge
+  -- from the chase camera): each new angle recomputes their faces.
+  local steer = floor(h.steer * 40 + 0.5) / 40
+  car.animate(steer)
+  physics.updateMatrix(h)
+  local w, hgt = lcd.getWindowSize()
+  render.track(h, state.cfg.camera / 100, state.frameDt)
+  state.frameDt = 0
+  local drew = render.frame(h, w, hgt, steer)
+  local hudChanged = updateHud(state)
+
+  if drew or hudChanged or stats then
+    state.framePending, state.pendingAt = true, t
+    -- A rectangle, not a plain invalidate(): that makes Ethos clear the
+    -- window before the paint, and the scene covers every pixel anyway.
+    lcd.invalidate(0, 0, w, hgt)
+  end
 end
 
 local function shadowText(x, y, text, flags)
@@ -564,6 +589,8 @@ function sim.paint(state)
     shadowText(w // 2, h // 2 - 12, "CarSim: loading", CENTERED)
     return
   end
+  state.framePending = false
+  state.paints = state.paints + 1
   render.paint(w, h)
 
   setFont(FONT_L)
@@ -582,8 +609,8 @@ function sim.paint(state)
 
   if state.cfg.stats then
     local tris, faces = render.stats()
-    shadowText(6, h - BUTTON_H - 34, string.format("paint %d%%  %dHz  tri %d  faces %d  mem %dk  S%+d T%+d %s",
-      state.cpuPaint or 0, state.rate or 0, tris, faces, floor(collectgarbage("count")),
+    shadowText(6, h - BUTTON_H - 34, string.format("fps %d  wake %d/s  paint %d%%  tri %d  faces %d  mem %dk  S%+d T%+d %s",
+      state.fps, state.rate, state.cpuPaint or 0, tris, faces, floor(collectgarbage("count")),
       floor((state.rawSteer or 0) * 100), floor((state.rawTrig or 0) * 100),
       useWheel(state) and "wheel" or "sticks"))
   end

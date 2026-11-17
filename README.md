@@ -38,7 +38,7 @@ Settings (saved to `carsim.cfg` next to the script):
 | Steering expo | 20% | 0–90% |
 | Camera distance | 100% | 50–200% |
 | Speed | km/h | km/h, mph |
-| Detail | Low | Low, High (two-tier trees) |
+| Detail | Low | Low (faster on a radio), High (hill silhouettes, two-tier trees, see-through shadow) |
 | Show CPU stats | Off | |
 | Clear best lap | | |
 
@@ -59,7 +59,15 @@ Sources are analog inputs by number: on the VX10, member 0 is the wheel and memb
 
 Ethos aborts a `paint` that runs about 20000 Lua instructions; `wakeup` is not held to that budget. So `wakeup` does all the work into flat display lists and `paint` only replays them. In the VX10 simulator, `paint` uses about 20% of its budget at 33 Hz.
 
-The circuit is flat and its pieces do not overlap, so the ground needs no sorting. Each track sample's four edge points are projected once per frame and shared by the quads either side; only the few quads that cross the edge of the view are clipped. Beyond 70 m, segments are drawn in pairs, and beyond 130 m the kerbs are left out. Trees and the gantry are sorted far to near and split around the car.
+The circuit is flat and its pieces do not overlap, so the ground needs no sorting. Track samples off to the side of the view are skipped before they are projected; each remaining sample's four edge points are projected once per frame and shared by the quads either side. The lcd clips triangles to the screen itself, so only quads that cross the near plane, or reach more than four screens out (the guard band), are clipped. Beyond 70 m, segments are drawn in pairs, beyond 140 m in fours, and the kerbs are left out beyond 100 m (Low) or 130 m (High). Trees and the gantry are sorted far to near and split around the car.
+
+On a radio both the Lua work and the `lcd` fills cost frame time:
+
+- A new frame invalidates the window as a rectangle: a plain `lcd.invalidate()` makes Ethos clear the window before the paint (measured in heli-sim on an X20: 1-3 fps).
+- `wakeup` builds a frame only once the last one has been painted; between paints it only runs the physics. A frame built before the last one reached the screen would never be seen.
+- At **Low** detail the far hills are a flat band (a rectangle fill, not triangles) and the car's shadow is opaque (blended fills are slow).
+- The front wheels turn in 1.4° steps, since each new angle recomputes their faces, and the car's body matrix is worked out once a frame, not every physics step.
+- **Show CPU stats** shows frames (paints) and wakeups per second.
 
 Ethos Lua uses 32-bit floats; the headless runner (lupa) uses 64-bit, so check anything numerically delicate on the simulator.
 

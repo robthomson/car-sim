@@ -40,6 +40,7 @@ track.KLX, track.KLY, track.KRX, track.KRY = KLX, KLY, KRX, KRY
 track.DIST = DIST
 track.count = 0
 track.length = 0
+track.MAX_GAP = 0            -- longest distance between neighbouring samples
 
 -- Trees: x, y, height, width, colour index (1..3).
 track.TREES = {}
@@ -75,7 +76,7 @@ end
 local function finishSamples()
   local n = track.count
   local hw, kw = track.HALF_WIDTH, track.HALF_WIDTH + track.KERB
-  local d = 0
+  local d, maxGap = 0, 0
   for i = 1, n do
     local a = (i == 1) and n or i - 1
     local b = (i == n) and 1 or i + 1
@@ -90,9 +91,12 @@ local function finishSamples()
     KRX[i], KRY[i] = CX[i] + ty * kw, CY[i] - tx * kw
     DIST[i] = d
     local ex, ey = CX[b] - CX[i], CY[b] - CY[i]
-    d = d + sqrt(ex * ex + ey * ey)
+    local e = sqrt(ex * ex + ey * ey)
+    if e > maxGap then maxGap = e end
+    d = d + e
   end
   track.length = d
+  track.MAX_GAP = maxGap
 end
 
 -- Distance squared from (x, y) to the closest sample of the whole circuit.
@@ -136,11 +140,15 @@ end
 -- the signed offset from the centre line (> 0 left) and the distance along
 -- the lap.
 function track.nearest(x, y, hint)
-  local n = track.count
+  -- Runs every physics step: the tables in locals, no modulo in the loop.
+  local n, cxs, cys = track.count, CX, CY
   local best, bestD2 = hint, 1e12
-  for k = -6, 6 do
-    local i = ((hint - 1 + k) % n) + 1
-    local dx, dy = x - CX[i], y - CY[i]
+  local i = hint - 7
+  if i < 0 then i = i + n end
+  for _ = 1, 13 do
+    i = i + 1
+    if i > n then i = i - n end
+    local dx, dy = x - cxs[i], y - cys[i]
     local d2 = dx * dx + dy * dy
     if d2 < bestD2 then best, bestD2 = i, d2 end
   end

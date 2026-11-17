@@ -32,6 +32,7 @@ local CAM_BACK, CAM_H = 7.5, 2.6    -- metres behind and above the car
 local LOOK_AHEAD, LOOK_Z = 6, 0.8   -- the point the camera looks at
 local DRAW_DIST = 230               -- metres
 local KERB_DIST = 130               -- kerbs beyond this are left out
+local KERB_DIST_LOW = 100           -- the same at Low detail
 local CAM_LAG = 5                   -- 1/s: how fast the camera swings round
 
 ---------------------------------------------------------------------------
@@ -57,7 +58,7 @@ local MODEL_COLORS = {
 local SKY_RGB = {{200, 222, 240}, {160, 198, 232}, {120, 168, 224}, {86, 138, 210}}
 local GRASS_RGB = {{110, 146, 92}, {92, 140, 70}, {80, 132, 58}}
 
-local BAND_R, BAND_C = {}, {}
+local BAND_R, BAND_C, BAND_C_LOW = {}, {}, {}
 
 local function buildColors()
   for m = 1, #MODEL_COLORS do
@@ -86,7 +87,12 @@ local function buildColors()
   local E = {92, 30, 10, 2.5, 0, -2, -7, -92}
   for i = 1, #E do BAND_R[i] = rad(E[i]) end
   local cols = {sky[4], sky[3], sky[2], sky[1], grass[1], grass[2], grass[3]}
-  for i = 1, #cols do BAND_C[i] = cols[i] end
+  for i = 1, #cols do BAND_C[i], BAND_C_LOW[i] = cols[i], cols[i] end
+  -- Low detail: the far hills are a flat band on the horizon, a rectangle
+  -- fill instead of their silhouette's triangles.
+  BAND_C_LOW[4] = C.hills
+  -- An opaque shadow at Low detail: blended fills are slow on the radio.
+  C.shadowSolid = lcd.RGB(50, 52, 56)
 end
 
 -- Far hills: elevation in degrees at evenly spaced azimuths (index 1 = north).
@@ -119,6 +125,8 @@ local cUx, cUy, cUz                  -- up
 local cFx, cFy, cFz                  -- forward
 local scrW, scrH, cx, cy, focal = 800, 480, 400, 240, 571
 local kx, ky = 1, 1                  -- frustum slopes (with margin)
+local GUARD = 4                      -- guard band, in screens either way of the view
+local gx, gy = GUARD, GUARD          -- its slopes
 
 local BY, BH, BCOL = {}, {}, {}
 local bandCount = 0
@@ -183,43 +191,59 @@ local function clipPlane(n, a, b, c, d, sx, sy, sz, dx, dy, dz)
   return m
 end
 
+-- Project a convex polygon (camera coordinates, all in front of the near
+-- plane) and fan it into triangles.
+local function fan(n, X, Y, Z, col)
+  local f = focal
+  local x0, y0 = cx + X[1] * f / Z[1], cy - Y[1] * f / Z[1]
+  local xp, yp = cx + X[2] * f / Z[2], cy - Y[2] * f / Z[2]
+  for i = 3, n do
+    local xi, yi = cx + X[i] * f / Z[i], cy - Y[i] * f / Z[i]
+    tri(x0, y0, xp, yp, xi, yi, col)
+    xp, yp = xi, yi
+  end
+end
+
 -- Clip a convex polygon in PX/PY/PZ (camera coordinates) and fan it into
--- triangles.
+-- triangles. Only the near plane has to be clipped: the lcd clips the
+-- triangles to the screen itself, so a polygon whose points all lie within
+-- the guard band (GUARD screens either way) is drawn as it is, and only one
+-- reaching further out is clipped to the view's sides.
 local function polygon(n, col)
   local any, all = 0, 31
+  local kxx, kyy, gxx, gyy = kx, ky, gx, gy
   for i = 1, n do
     local x, y, z = PX[i], PY[i], PZ[i]
     local code = 0
     if z < NEAR then code = 1 end
-    if x > kx * z then code = code | 2 elseif -x > kx * z then code = code | 4 end
-    if y > ky * z then code = code | 8 elseif -y > ky * z then code = code | 16 end
+    if x > kxx * z then code = code | 2 elseif -x > kxx * z then code = code | 4 end
+    if y > kyy * z then code = code | 8 elseif -y > kyy * z then code = code | 16 end
+    if x > gxx * z or -x > gxx * z or y > gyy * z or -y > gyy * z then code = code | 32 end
     any, all = any | code, all & code
   end
-  if all ~= 0 then return end
-  local f = focal
-  if any == 0 then
-    local x0, y0 = cx + PX[1] * f / PZ[1], cy - PY[1] * f / PZ[1]
-    local xp, yp = cx + PX[2] * f / PZ[2], cy - PY[2] * f / PZ[2]
-    for i = 3, n do
-      local xi, yi = cx + PX[i] * f / PZ[i], cy - PY[i] * f / PZ[i]
-      tri(x0, y0, xp, yp, xi, yi, col)
-      xp, yp = xi, yi
+  if all & 31 ~= 0 then return end
+  if any & 33 == 0 then fan(n, PX, PY, PZ, col) return end
+  if any & 1 ~= 0 then
+    n = clipPlane(n, 0, 0, 1, -NEAR, PX, PY, PZ, QX, QY, QZ)
+    if n < 3 then return end
+    local inside = true
+    for i = 1, n do
+      local x, y, z = QX[i], QY[i], QZ[i]
+      if x > gxx * z or -x > gxx * z or y > gyy * z or -y > gyy * z then inside = false break end
     end
+    if inside then fan(n, QX, QY, QZ, col) return end
+    n = clipPlane(n, -1, 0, kxx, 0, QX, QY, QZ, PX, PY, PZ)
+    n = clipPlane(n, 1, 0, kxx, 0, PX, PY, PZ, QX, QY, QZ)
+    n = clipPlane(n, 0, -1, kyy, 0, QX, QY, QZ, PX, PY, PZ)
+    n = clipPlane(n, 0, 1, kyy, 0, PX, PY, PZ, QX, QY, QZ)
+    if n >= 3 then fan(n, QX, QY, QZ, col) end
     return
   end
-  n = clipPlane(n, 0, 0, 1, -NEAR, PX, PY, PZ, QX, QY, QZ)
-  n = clipPlane(n, -1, 0, kx, 0, QX, QY, QZ, PX, PY, PZ)
-  n = clipPlane(n, 1, 0, kx, 0, PX, PY, PZ, QX, QY, QZ)
-  n = clipPlane(n, 0, -1, ky, 0, QX, QY, QZ, PX, PY, PZ)
-  n = clipPlane(n, 0, 1, ky, 0, PX, PY, PZ, QX, QY, QZ)
-  if n < 3 then return end
-  local x0, y0 = cx + QX[1] * f / QZ[1], cy - QY[1] * f / QZ[1]
-  local xp, yp = cx + QX[2] * f / QZ[2], cy - QY[2] * f / QZ[2]
-  for i = 3, n do
-    local xi, yi = cx + QX[i] * f / QZ[i], cy - QY[i] * f / QZ[i]
-    tri(x0, y0, xp, yp, xi, yi, col)
-    xp, yp = xi, yi
-  end
+  n = clipPlane(n, -1, 0, kxx, 0, PX, PY, PZ, QX, QY, QZ)
+  n = clipPlane(n, 1, 0, kxx, 0, QX, QY, QZ, PX, PY, PZ)
+  n = clipPlane(n, 0, -1, kyy, 0, PX, PY, PZ, QX, QY, QZ)
+  n = clipPlane(n, 0, 1, kyy, 0, QX, QY, QZ, PX, PY, PZ)
+  if n >= 3 then fan(n, PX, PY, PZ, col) end
 end
 
 -- A flat quad on the ground (corners in order).
@@ -290,36 +314,43 @@ local GX, GY, GZ, GC, GSX, GSY = {}, {}, {}, {}, {}, {}
 local STAMP = {}
 local frameNo = 0
 local NEAR_SEG = 70                  -- metres: beyond this, segments are drawn in pairs
+local MID_SEG = 140                  -- and beyond this, in fours
+
+-- The four points lie on the sample's normal, at OFFSETS from its centre,
+-- so the centre and the normal are transformed once and the points follow.
+local OFFSETS = {0, 0, 0, 0}
 
 local function projectSample(i)
   STAMP[i] = frameNo
   local base = (i - 1) * 4
-  local xs1, xs2, xs3, xs4 = track.KLX[i], track.LX[i], track.RX[i], track.KRX[i]
-  local ys1, ys2, ys3, ys4 = track.KLY[i], track.LY[i], track.RY[i], track.KRY[i]
   local rx, ry, ux, uy, fx, fy = cRx, cRy, cUx, cUy, cFx, cFy
-  local uz0, fz0 = -eyeZ * cUz, -eyeZ * cFz
-  local f, kxx, kyy = focal, kx, ky
+  local dx, dy = track.CX[i] - eyeX, track.CY[i] - eyeY
+  local x0, y0, z0 = dx * rx + dy * ry, dx * ux + dy * uy - eyeZ * cUz, dx * fx + dy * fy - eyeZ * cFz
+  local nx, ny = track.NX[i], track.NY[i]
+  local nxc, nyc, nzc = nx * rx + ny * ry, nx * ux + ny * uy, nx * fx + ny * fy
+  local f, kxx, kyy, gxx, gyy, scx, scy = focal, kx, ky, gx, gy, cx, cy
+  local X, Y, Z, CODE, SX_, SY_, OFF = GX, GY, GZ, GC, GSX, GSY, OFFSETS
   for k = 1, 4 do
-    local wx, wy
-    if k == 1 then wx, wy = xs1, ys1 elseif k == 2 then wx, wy = xs2, ys2
-    elseif k == 3 then wx, wy = xs3, ys3 else wx, wy = xs4, ys4 end
-    local dx, dy = wx - eyeX, wy - eyeY
-    local x, y, z = dx * rx + dy * ry, dx * ux + dy * uy + uz0, dx * fx + dy * fy + fz0
+    local o = OFF[k]
+    local x, y, z = x0 + nxc * o, y0 + nyc * o, z0 + nzc * o
     local code = 0
     if z < NEAR then code = 1 end
     if x > kxx * z then code = code | 2 elseif -x > kxx * z then code = code | 4 end
     if y > kyy * z then code = code | 8 elseif -y > kyy * z then code = code | 16 end
+    if x > gxx * z or -x > gxx * z or y > gyy * z or -y > gyy * z then code = code | 32 end
     local m = base + k
-    GX[m], GY[m], GZ[m], GC[m] = x, y, z, code
-    if z >= NEAR then GSX[m], GSY[m] = cx + x * f / z, cy - y * f / z end
+    X[m], Y[m], Z[m], CODE[m] = x, y, z, code
+    if z >= NEAR then SX_[m], SY_[m] = scx + x * f / z, scy - y * f / z end
   end
 end
 
 -- The ground quad between sample points a, b (at sample i) and c, d (at j).
+-- Drawn as it is when its points are in front of the camera and within the
+-- guard band (the lcd clips it to the screen).
 local function sampleQuad(a, b, c, d, col)
   local ca, cb, cc, cd = GC[a], GC[b], GC[c], GC[d]
-  if ca & cb & cc & cd ~= 0 then return end
-  if ca | cb | cc | cd == 0 then
+  if ca & cb & cc & cd & 31 ~= 0 then return end
+  if (ca | cb | cc | cd) & 33 == 0 then
     local ax, ay, cx3, cy3 = GSX[a], GSY[a], GSX[c], GSY[c]
     tri(ax, ay, GSX[b], GSY[b], cx3, cy3, col)
     tri(ax, ay, cx3, cy3, GSX[d], GSY[d], col)
@@ -341,26 +372,43 @@ local function circuit()
   local fx, fy = cFx, cFy
   local fl = sqrt(fx * fx + fy * fy)
   fx, fy = fx / fl, fy / fl
-  local draw2, kerb2, near2 = DRAW_DIST * DRAW_DIST, KERB_DIST * KERB_DIST, NEAR_SEG * NEAR_SEG
+  local kd = (detail == 1) and KERB_DIST_LOW or KERB_DIST
+  local draw2, kerb2, near2, mid2 = DRAW_DIST * DRAW_DIST, kd * kd, NEAR_SEG * NEAR_SEG, MID_SEG * MID_SEG
   local ex, ey = eyeX, eyeY
+  -- Side culling: a quad from sample i on lies within (gap x step + half
+  -- the kerbed width) of sample i, so it is skipped when that circle is
+  -- wholly outside a side plane of the view (x - kx z > r x sqrt(1 + kx^2)).
+  local rx, ry, cfx, cfy, fz0 = cRx, cRy, cFx, cFy, -eyeZ * cFz
+  local kxx = kx
+  local kn = sqrt(1 + kxx * kxx)
+  local gapK, halfK = track.MAX_GAP * kn, (track.HALF_WIDTH + track.KERB) * kn
   local i = 1
   while i <= n do
     local dx, dy = CXs[i] - ex, CYs[i] - ey
     local d2 = dx * dx + dy * dy
-    local step = (d2 > near2 and i < n) and 2 or 1
-    -- Within reach, and not wholly behind the camera.
+    local step = 1
+    if d2 > near2 then
+      if d2 > mid2 then step = 4 else step = 2 end
+      if i + step > n + 1 then step = n + 1 - i end
+    end
+    -- Within reach, not wholly behind the camera, nor off to a side.
     if d2 < draw2 and dx * fx + dy * fy > -12 then
-      local j = i + step
-      if j > n then j = j - n end
-      if STAMP[i] ~= frameNo then projectSample(i) end
-      if STAMP[j] ~= frameNo then projectSample(j) end
-      local bi, bj = (i - 1) * 4, (j - 1) * 4
-      local stripe = ((step == 1) and (i % 2) or ((i // 2) % 2)) + 1
-      sampleQuad(bi + 2, bj + 2, bj + 3, bi + 3, asphalt[stripe])
-      if d2 < kerb2 then
-        local kc = kerb[stripe]
-        sampleQuad(bi + 1, bj + 1, bj + 2, bi + 2, kc)
-        sampleQuad(bi + 3, bj + 3, bj + 4, bi + 4, kc)
+      local x = dx * rx + dy * ry
+      local kz = kxx * (dx * cfx + dy * cfy + fz0)
+      local r = gapK * step + halfK
+      if x - kz < r and -x - kz < r then
+        local j = i + step
+        if j > n then j = j - n end
+        if STAMP[i] ~= frameNo then projectSample(i) end
+        if STAMP[j] ~= frameNo then projectSample(j) end
+        local bi, bj = (i - 1) * 4, (j - 1) * 4
+        local stripe = (i // step) % 2 + 1
+        sampleQuad(bi + 2, bj + 2, bj + 3, bi + 3, asphalt[stripe])
+        if d2 < kerb2 then
+          local kc = kerb[stripe]
+          sampleQuad(bi + 1, bj + 1, bj + 2, bi + 2, kc)
+          sampleQuad(bi + 3, bj + 3, bj + 4, bi + 4, kc)
+        end
       end
     end
     i = i + step
@@ -529,6 +577,8 @@ end
 function render.init(mesh, circuitModule)
   model = mesh
   track = circuitModule
+  local hw, kw = track.HALF_WIDTH, track.HALF_WIDTH + track.KERB
+  OFFSETS[1], OFFSETS[2], OFFSETS[3], OFFSETS[4] = kw, hw, -hw, -kw
   buildColors()
   hillRing = ringTables(HILLS)
 end
@@ -579,6 +629,7 @@ function render.frame(h, w, hgt, animKey)
   focal = (w * 0.5) / tan(hfov * 0.5)
   kx = (w * 0.5 + 8) / focal
   ky = (hgt * 0.5 + 8) / focal
+  gx, gy = kx * GUARD, ky * GUARD
 
   local sy, cyw = sin(camYaw), cos(camYaw)
   local sp, cp = sin(camPitch), cos(camPitch)
@@ -587,16 +638,18 @@ function render.frame(h, w, hgt, animKey)
   cUx, cUy, cUz = -sp * sy, -sp * cyw, cp
 
   bandCount = 0
+  local low = detail == 1
+  local bandC = low and BAND_C_LOW or BAND_C
   local yPrev = elevY(BAND_R[1])
-  for i = 1, #BAND_C do
+  for i = 1, #bandC do
     local y = elevY(BAND_R[i + 1])
-    band(yPrev, y, BAND_C[i])
+    band(yPrev, y, bandC[i])
     yPrev = y
   end
 
   -- Ground layer.
   triCount = 0
-  silhouette(hillRing, C.hills)
+  if not low then silhouette(hillRing, C.hills) end
   circuit()
   -- Shadow: the car's footprint, a little larger.
   do
@@ -605,7 +658,7 @@ function render.frame(h, w, hgt, animKey)
     local ax, ay = c * hl, s * hl
     local bx, by = -s * hw, c * hw
     groundQuad(h.px + ax + bx, h.py + ay + by, h.px - ax + bx, h.py - ay + by,
-      h.px - ax - bx, h.py - ay - by, h.px + ax - bx, h.py + ay - by, C.shadow)
+      h.px - ax - bx, h.py - ay - by, h.px + ax - bx, h.py + ay - by, low and C.shadowSolid or C.shadow)
   end
   triGround = triCount
 
@@ -653,30 +706,33 @@ end
 
 local function drawTris(from, to)
   local last
-  local dtri = lcd.drawFilledTriangle
+  -- The lists in locals: an upvalue costs an extra VM instruction a read.
+  local dtri, color = lcd.drawFilledTriangle, lcd.color
+  local X1, Y1, X2, Y2, X3, Y3, COL = TX1, TY1, TX2, TY2, TX3, TY3, TCOL
   for i = from, to do
-    local col = TCOL[i]
-    if col ~= last then lcd.color(col); last = col end
-    dtri(TX1[i], TY1[i], TX2[i], TY2[i], TX3[i], TY3[i])
+    local col = COL[i]
+    if col ~= last then color(col); last = col end
+    dtri(X1[i], Y1[i], X2[i], Y2[i], X3[i], Y3[i])
   end
 end
 
 function render.paint(w, h)
-  local rect = lcd.drawFilledRectangle
+  local rect, color = lcd.drawFilledRectangle, lcd.color
   for i = 1, bandCount do
-    lcd.color(BCOL[i])
+    color(BCOL[i])
     rect(0, BY[i], w, BH[i])
   end
   drawTris(1, triFar)
 
   if modelMode == 2 then
     local FA, FB, FC, FD = model.FA, model.FB, model.FC, model.FD
+    local SX, SY, KEY, FCOL = SX, SY, KEY, FCOL
     local dtri = lcd.drawFilledTriangle
     local last
     for k = 1, keyCount do
       local i = KEY[k] % KEY_FACES
       local col = FCOL[i]
-      if col ~= last then lcd.color(col); last = col end
+      if col ~= last then color(col); last = col end
       local a, c = FA[i], FC[i]
       local ax, ay, cx3, cy3 = SX[a], SY[a], SX[c], SY[c]
       local b = FB[i]

@@ -1,0 +1,16 @@
+*.pyc
+__pycache__/
+
+# Simulator radios (the Ethos VS Code extension creates simulators/<BOARD>_<PROTOCOL>@<release>)
+simulator/
+simulators/
+
+# Per-machine Ethos extension settings (board, protocol, release)
+.vscode/settings.json
+.vscode/logs/
+
+# Headless test output
+tools/out/
+
+# Settings written by the tool
+src/carsim/carsim.cfg
